@@ -7,7 +7,7 @@ local scanner = peripheral.find("environmentDetector")
 local reader = peripheral.find("blockReader")
 
 -- Calibration Variables
-local gX, gY, gZ = 100, 75, -200 -- MUST CHANGE: Exact XYZ of your Cannon Mount
+local gX, gY, gZ = 2544, -60, 1323
 local yawOffset = 0 -- Change to 90, 180, or -90 if the gun aims backwards
 local deadzone = 2.5 -- Degrees of tolerance before firing
 

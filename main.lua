@@ -1,10 +1,10 @@
 -- ==========================================
--- ANTI-AIR TURRET FIRE CONTROL SYSTEM v9
--- (Combat HUD & Auto-Lock Edition)
+-- ANTI-AIR TURRET FIRE CONTROL SYSTEM v9.1
+-- (Radar Fix & Diagnostics Patch)
 -- ==========================================
 
-local scanner = peripheral.find("environment_detector")
-local reader = peripheral.find("block_reader")
+local scanner = peripheral.find("environmentDetector")
+local reader = peripheral.find("blockReader")
 
 local yawPosRelay   = peripheral.wrap("redstone_relay_0") 
 local yawNegRelay   = peripheral.wrap("redstone_relay_1") 
@@ -20,16 +20,18 @@ end
 -- ==========================================
 -- CALIBRATION
 -- ==========================================
-local scanRange = 16  -- Locked to 16m to bypass server config crash
-local yawOffset = 0   -- Change to 180 if it aims perfectly backward
-local deadzone = 4.0  -- Increased slightly to prevent 128 RPM jitter
+local scanRange = 16  
+local yawOffset = 0   
+local deadzone = 4.0  
 
 local logicTickRate = 0.05 
-local uiTickRate = 1.0      
+-- FIXED: Slowed the radar sweep back down to bypass server cooldowns
+local uiTickRate = 2.0      
 
-local selectedTargetName = nil -- Switched from UUID to Name for stability
+local selectedTargetName = nil 
 local cachedEntities = {}
 local sysStatus = "STANDBY"
+local radarStatus = "SWEEPING" -- New diagnostic variable
 
 local function wrapAngle(angle)
     return (angle + 180) % 360 - 180
@@ -54,13 +56,13 @@ end
 local function drawUI(gunY, gunP, tarY, tarP, dist)
     term.setCursorPos(1, 1)
     term.clearLine()
-    print("=== CIWS COMBAT OS v9 ===")
+    print("=== CIWS COMBAT OS v9.1 ===")
     
     term.setCursorPos(1, 2)
     term.clearLine()
-    print("SYS: " .. sysStatus .. " | Rng: " .. scanRange .. "m")
+    -- FIXED: Now shows if the radar is actively working or jammed
+    print("SYS: " .. sysStatus .. " | RADAR: " .. radarStatus)
 
-    -- Diagnostic Readout
     term.setCursorPos(1, 3)
     term.clearLine()
     local gY_str = string.format("%.1f", gunY or 0)
@@ -80,7 +82,6 @@ local function drawUI(gunY, gunP, tarY, tarP, dist)
     term.setCursorPos(1, 5)
     print("----------------------------------------")
     
-    -- Target List
     for i = 1, 10 do
         term.setCursorPos(1, 5 + i)
         term.clearLine()
@@ -122,7 +123,6 @@ while true do
         
         local activeTarget = nil
         
-        -- Lock onto manual selection, OR default to closest target
         if #cachedEntities > 0 then
             if selectedTargetName then
                 for _, ent in ipairs(cachedEntities) do
@@ -132,11 +132,10 @@ while true do
                     end
                 end
             else
-                activeTarget = cachedEntities[1] -- Closest entity
+                activeTarget = cachedEntities[1]
             end
         end
 
-        -- Read Gun Data
         local gunData = reader.getBlockData()
         local currentYaw = 0
         local currentPitch = 0
@@ -156,7 +155,6 @@ while true do
             local yawError = wrapAngle(targetYaw - currentYaw)
             local pitchError = targetPitch - currentPitch
 
-            -- Engage Yaw Motors
             if yawError > deadzone then
                 setRelay(yawPosRelay, true); setRelay(yawNegRelay, false)
                 sysStatus = "TRACKING -> L"
@@ -167,7 +165,6 @@ while true do
                 setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
             end
 
-            -- Engage Pitch Motors
             if pitchError > deadzone then
                 setRelay(pitchPosRelay, true); setRelay(pitchNegRelay, false)
             elseif pitchError < -deadzone then
@@ -176,7 +173,6 @@ while true do
                 setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, false)
             end
 
-            -- Firing Solution
             if math.abs(yawError) <= deadzone and math.abs(pitchError) <= deadzone then
                 setRelay(fireRelay, true)
                 sysStatus = "FIRING!"
@@ -189,7 +185,6 @@ while true do
 
             drawUI(currentYaw, currentPitch, targetYaw, targetPitch, realDist)
         else
-            -- No Target / Safety Mode
             setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
             setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, false)
             setRelay(fireRelay, false)
@@ -206,11 +201,15 @@ while true do
         
         local success, result = pcall(function() return scanner.scanEntities(scanRange) end)
         
+        -- FIXED: If the scan fails, it will now visibly tell you on the HUD
         if success and type(result) == "table" then
+            radarStatus = "OK"
             cachedEntities = result
             table.sort(cachedEntities, function(a, b)
                 return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2)
             end)
+        else
+            radarStatus = "JAMMED (Cooldown/Range)"
         end
         
         uiTimer = os.startTimer(uiTickRate)
@@ -222,7 +221,7 @@ while true do
         local button, x, y = p1, p2, p3
         
         if y == 18 then
-            selectedTargetName = nil -- Resets to Auto-target closest
+            selectedTargetName = nil
             sysStatus = "AUTO-TARGETING"
         elseif y >= 6 and y <= 15 then
             local clickedIndex = y - 5

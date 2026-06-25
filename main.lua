@@ -1,6 +1,6 @@
 -- ==========================================
--- ANTI-AIR TURRET FIRE CONTROL SYSTEM v10
--- (Stable Display & Auto-Aim Edition)
+-- ANTI-AIR TURRET FIRE CONTROL SYSTEM
+-- (V8 Baseline + Auto-Lock Fix)
 -- ==========================================
 
 local scanner = peripheral.find("environmentDetector")
@@ -20,16 +20,15 @@ end
 -- ==========================================
 -- CALIBRATION
 -- ==========================================
-local scanRange = 16  
-local yawOffset = 0   
-local deadzone = 4.0  
+local scanRange = 16  -- Hard-capped to 16 to prevent server config crashes
+local yawOffset = 0 
+local deadzone = 4.0  -- Slightly increased to stop 128 RPM jitter
 
-local logicTickRate = 0.05  -- Motors update fast (20Hz)
-local uiTickRate = 1.5      -- Screen updates slow (Stable, no crashes)
+local logicTickRate = 0.05  -- Gun motors run at 20 ticks per second
+local uiTickRate = 1.5      -- Radar sweeps every 1.5 seconds
 
-local selectedTargetName = nil 
 local cachedEntities = {}
-local radarStatus = "SWEEPING"
+local scanError = nil
 
 local function wrapAngle(angle)
     return (angle + 180) % 360 - 180
@@ -49,38 +48,32 @@ local function setRelay(relay, state)
 end
 
 -- ==========================================
--- STABLE COMBAT HUD
+-- UI DRAWING LOGIC
 -- ==========================================
-local function drawUI(gunY, gunP)
+local function drawUI()
     term.setCursorPos(1, 1)
     term.clearLine()
-    print("=== CIWS COMBAT OS v10 ===")
+    print("=== CIWS TARGETING OS (AUTO-LOCK) ===")
     
     term.setCursorPos(1, 2)
     term.clearLine()
-    local mode = "AUTO-LOCK (Closest)"
-    if selectedTargetName then mode = "MANUAL LOCK" end
-    print("MODE: " .. mode .. " | RADAR: " .. radarStatus)
-
-    term.setCursorPos(1, 3)
-    term.clearLine()
-    local gY_str = string.format("%.1f", gunY or 0)
-    local gP_str = string.format("%.1f", gunP or 0)
-    print("LAST GUN POS -> Yaw: " .. gY_str .. " | Pitch: " .. gP_str)
-
-    term.setCursorPos(1, 4)
-    print("----------------------------------------")
+    if scanError then
+        print("RADAR STATUS: " .. tostring(scanError))
+    else
+        print("RADAR STATUS: Sweeping (" .. scanRange .. "m)...")
+    end
     
     for i = 1, 12 do
-        term.setCursorPos(1, 4 + i)
+        term.setCursorPos(1, 3 + i)
         term.clearLine()
         
         local ent = cachedEntities[i]
         if ent then
-            local eDist = math.floor(math.sqrt(ent.x^2 + ent.y^2 + ent.z^2))
+            local dist = math.floor(math.sqrt(ent.x^2 + ent.y^2 + ent.z^2))
             local prefix = "[ ]"
-            if ent.name == selectedTargetName then prefix = "[X]" end
-            print(string.format("%d. %s %s (%dm)", i, prefix, ent.name, eDist))
+            -- Visually highlight the closest entity that the gun is locking onto
+            if i == 1 then prefix = "[X]" end 
+            print(string.format("%d. %s %s (Dist: %dm)", i, prefix, ent.name, dist))
         else
             print("") 
         end
@@ -88,10 +81,10 @@ local function drawUI(gunY, gunP)
 
     term.setCursorPos(1, 17)
     term.clearLine()
-    print("----------------------------------------")
+    print("---------------------------------------------")
     term.setCursorPos(1, 18)
     term.clearLine()
-    print("[X] CLEAR TARGET (Revert to Auto-lock)")
+    print("WARNING: STAND CLEAR. TURRET IS LIVE.")
 end
 
 -- ==========================================
@@ -101,37 +94,20 @@ local logicTimer = os.startTimer(logicTickRate)
 local uiTimer = os.startTimer(uiTickRate)
 
 term.clear()
-drawUI(0, 0)
+drawUI()
 
 while true do
     local event, p1, p2, p3 = os.pullEvent()
 
     -- ==============================
-    -- 1. HIGH-SPEED MOTOR LOGIC
+    -- 1. GUN MOVEMENT LOGIC
     -- ==============================
     if event == "timer" and p1 == logicTimer then
         
+        -- THE FIX: Completely bypass mouse clicks. Always grab the closest target.
         local activeTarget = nil
-        
         if #cachedEntities > 0 then
-            if selectedTargetName then
-                for _, ent in ipairs(cachedEntities) do
-                    if ent.name == selectedTargetName then
-                        activeTarget = ent
-                        break
-                    end
-                end
-            else
-                activeTarget = cachedEntities[1] -- Auto-lock closest
-            end
-        end
-
-        local gunData = reader.getBlockData()
-        local currentYaw = 0
-        local currentPitch = 0
-        if gunData then
-            currentYaw = gunData.CannonYaw or 0
-            currentPitch = gunData.CannonPitch or 0
+            activeTarget = cachedEntities[1]
         end
 
         if activeTarget then
@@ -141,10 +117,15 @@ while true do
             local targetYaw = math.deg(math.atan2(-tX, tZ)) + yawOffset
             local targetPitch = math.deg(math.atan2(tY, distXZ))
 
+            -- Added a safety fallback in case the block reader glitches
+            local gunData = reader.getBlockData() or {}
+            local currentYaw = gunData.CannonYaw or 0
+            local currentPitch = gunData.CannonPitch or 0
+
             local yawError = wrapAngle(targetYaw - currentYaw)
             local pitchError = targetPitch - currentPitch
 
-            -- Yaw Motor Control
+            -- Yaw Control
             if yawError > deadzone then
                 setRelay(yawPosRelay, true); setRelay(yawNegRelay, false)
             elseif yawError < -deadzone then
@@ -153,7 +134,7 @@ while true do
                 setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
             end
 
-            -- Pitch Motor Control
+            -- Pitch Control
             if pitchError > deadzone then
                 setRelay(pitchPosRelay, true); setRelay(pitchNegRelay, false)
             elseif pitchError < -deadzone then
@@ -169,7 +150,7 @@ while true do
                 setRelay(fireRelay, false)
             end
         else
-            -- Safety Mode (No Targets)
+            -- Safety weapon mode (No Targets)
             setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
             setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, false)
             setRelay(fireRelay, false)
@@ -178,46 +159,26 @@ while true do
         logicTimer = os.startTimer(logicTickRate)
 
     -- ==============================
-    -- 2. RADAR & DISPLAY LOOP
+    -- 2. RADAR SCANNING LOGIC
     -- ==============================
     elseif event == "timer" and p1 == uiTimer then
         
-        local success, result = pcall(function() return scanner.scanEntities(scanRange) end)
+        local success, result = pcall(function() 
+            return scanner.scanEntities(scanRange) 
+        end)
         
         if success and type(result) == "table" then
-            radarStatus = "OK"
+            scanError = nil
             cachedEntities = result
             table.sort(cachedEntities, function(a, b)
                 return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2)
             end)
         else
-            radarStatus = "JAMMED"
+            scanError = result
         end
         
-        -- Grab gun data just for the display update
-        local gData = reader.getBlockData() or {}
-        drawUI(gData.CannonYaw or 0, gData.CannonPitch or 0)
-        
+        drawUI()
         uiTimer = os.startTimer(uiTickRate)
-
-    -- ==============================
-    -- 3. MOUSE CLICKS
-    -- ==============================
-    elseif event == "mouse_click" then
-        local button, x, y = p1, p2, p3
-        
-        if y == 18 then
-            selectedTargetName = nil
-            local gData = reader.getBlockData() or {}
-            drawUI(gData.CannonYaw or 0, gData.CannonPitch or 0)
-        elseif y >= 5 and y <= 16 then
-            local clickedIndex = y - 4
-            local clickedEntity = cachedEntities[clickedIndex]
-            if clickedEntity then
-                selectedTargetName = clickedEntity.name
-                local gData = reader.getBlockData() or {}
-                drawUI(gData.CannonYaw or 0, gData.CannonPitch or 0)
-            end
-        end
     end
+    -- Mouse clicks completely removed to prevent UI lockups
 end

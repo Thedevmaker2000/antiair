@@ -1,17 +1,16 @@
 -- ==========================================
--- ANTI-AIR TURRET FIRE CONTROL SYSTEM v5
--- (Interactive Targeting OS Edition)
+-- ANTI-AIR TURRET FIRE CONTROL SYSTEM v6
+-- (Flicker-Free Radar OS)
 -- ==========================================
 
 local scanner = peripheral.find("environment_detector")
 local reader = peripheral.find("block_reader")
 
--- Map the 5 specific relays
-local yawPosRelay   = peripheral.wrap("redstone_relay_0") -- Left
-local yawNegRelay   = peripheral.wrap("redstone_relay_1") -- Right
-local pitchPosRelay = peripheral.wrap("redstone_relay_2") -- Up
-local pitchNegRelay = peripheral.wrap("redstone_relay_3") -- Down
-local fireRelay     = peripheral.wrap("redstone_relay_4") -- Fire
+local yawPosRelay   = peripheral.wrap("redstone_relay_0") 
+local yawNegRelay   = peripheral.wrap("redstone_relay_1") 
+local pitchPosRelay = peripheral.wrap("redstone_relay_2") 
+local pitchNegRelay = peripheral.wrap("redstone_relay_3") 
+local fireRelay     = peripheral.wrap("redstone_relay_4") 
 
 if not scanner or not reader then
     print("ERROR: Sensors offline. Check Wired Modems.")
@@ -19,89 +18,88 @@ if not scanner or not reader then
 end
 
 -- ==========================================
--- CALIBRATION & STATE
+-- CALIBRATION
 -- ==========================================
-local scanRange = 32
+-- REDUCED to 16 to avoid silent config crashes. Increase later if it works.
+local scanRange = 16 
 local yawOffset = 0 
 local deadzone = 2.5 
-local tickRate = 0.05 -- 20 times a second
 
--- UI State
+-- Timing: Run motors fast (20Hz), but update screen slower (2Hz) to prevent flicker
+local logicTickRate = 0.05 
+local uiTickRate = 0.5      
+
 local selectedTargetUUID = nil
 local cachedEntities = {}
+local scanError = nil
 
--- Utility: Wrap angle to -180/180
 local function wrapAngle(angle)
     return (angle + 180) % 360 - 180
 end
 
--- Utility: Toggle relay power
--- NOTE: If your relays emit from a specific face, change "front" to "top", "bottom", etc.
 local function setRelay(relay, state)
     if relay then relay.setOutput("front", state) end
 end
 
 -- ==========================================
--- UI DRAWING LOGIC
+-- FLICKER-FREE UI DRAWING
 -- ==========================================
 local function drawUI()
-    term.clear()
     term.setCursorPos(1, 1)
-    print("=== RADAR TARGETING OS ===")
-    print("Click a target to lock on. Click [X] to clear.")
-    print("---------------------------------------------")
+    term.clearLine()
+    print("=== RADAR TARGETING OS v6 ===")
     
-    if #cachedEntities == 0 then
-        print("No entities detected in range (" .. scanRange .. "m).")
+    term.setCursorPos(1, 2)
+    term.clearLine()
+    if scanError then
+        print("SCAN ERROR: " .. tostring(scanError))
         return
     end
 
-    for i, entity in ipairs(cachedEntities) do
-        -- Only show top 12 to fit on a standard monitor
-        if i > 12 then break end 
-
-        local dist = math.floor(math.sqrt(entity.x^2 + entity.y^2 + entity.z^2))
-        local prefix = "[ ]"
-        
-        if entity.uuid == selectedTargetUUID then
-            prefix = "[X]" -- Highlight locked target
-        end
-        
-        print(string.format("%d. %s %s (Dist: %dm)", i, prefix, entity.name, dist))
-    end
+    term.setCursorPos(1, 3)
+    term.clearLine()
+    print("Click target to lock. Range: " .. scanRange .. "m")
     
+    for i = 1, 12 do
+        term.setCursorPos(1, 3 + i)
+        term.clearLine()
+        
+        local ent = cachedEntities[i]
+        if ent then
+            local dist = math.floor(math.sqrt(ent.x^2 + ent.y^2 + ent.z^2))
+            local prefix = "[ ]"
+            if ent.uuid == selectedTargetUUID then prefix = "[X]" end
+            print(string.format("%d. %s %s (Dist: %dm)", i, prefix, ent.name, dist))
+        else
+            print("") -- Clear unused lines
+        end
+    end
+
+    term.setCursorPos(1, 17)
+    term.clearLine()
     print("---------------------------------------------")
     term.setCursorPos(1, 18)
+    term.clearLine()
     print("[X] CLEAR CURRENT TARGET")
 end
 
 -- ==========================================
 -- MAIN EVENT LOOP
 -- ==========================================
-local timerId = os.startTimer(tickRate)
+local logicTimer = os.startTimer(logicTickRate)
+local uiTimer = os.startTimer(uiTickRate)
 
+term.clear()
 drawUI()
 
 while true do
-    -- Wait for either a timer tick or a mouse click
     local event, p1, p2, p3 = os.pullEvent()
 
     -- ==============================
-    -- 1. AIMING & SCANNING LOGIC
+    -- 1. GUN MOVEMENT LOGIC
     -- ==============================
-    if event == "timer" and p1 == timerId then
-        -- Refresh entities and sort by closest distance
-        local rawEntities = scanner.scanEntities(scanRange) or {}
-        table.sort(rawEntities, function(a, b)
-            local distA = a.x^2 + a.y^2 + a.z^2
-            local distB = b.x^2 + b.y^2 + b.z^2
-            return distA < distB
-        end)
-        cachedEntities = rawEntities
+    if event == "timer" and p1 == logicTimer then
         
-        drawUI()
-
-        -- Find the actively selected target
         local activeTarget = nil
         for _, ent in ipairs(cachedEntities) do
             if ent.uuid == selectedTargetUUID then
@@ -110,7 +108,6 @@ while true do
             end
         end
 
-        -- If target is valid and in range, aim and fire
         if activeTarget then
             local tX, tY, tZ = activeTarget.x, activeTarget.y, activeTarget.z
             local distXZ = math.sqrt(tX^2 + tZ^2)
@@ -119,13 +116,14 @@ while true do
             local targetPitch = math.deg(math.atan2(tY, distXZ))
 
             local gunData = reader.getBlockData()
-            local currentYaw = gunData.CannonYaw
-            local currentPitch = gunData.CannonPitch
+            -- Add safety fallback to 0 in case the reader hiccups
+            local currentYaw = gunData.CannonYaw or 0
+            local currentPitch = gunData.CannonPitch or 0
 
             local yawError = wrapAngle(targetYaw - currentYaw)
             local pitchError = targetPitch - currentPitch
 
-            -- Yaw (Left/Right)
+            -- Yaw
             if yawError > deadzone then
                 setRelay(yawPosRelay, true); setRelay(yawNegRelay, false)
             elseif yawError < -deadzone then
@@ -134,7 +132,7 @@ while true do
                 setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
             end
 
-            -- Pitch (Up/Down)
+            -- Pitch
             if pitchError > deadzone then
                 setRelay(pitchPosRelay, true); setRelay(pitchNegRelay, false)
             elseif pitchError < -deadzone then
@@ -149,38 +147,51 @@ while true do
             else
                 setRelay(fireRelay, false)
             end
-
         else
-            -- No target selected or target moved out of range
-            setRelay(yawPosRelay, false)
-            setRelay(yawNegRelay, false)
-            setRelay(pitchPosRelay, false)
-            setRelay(pitchNegRelay, false)
+            -- Safety weapon
+            setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
+            setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, false)
             setRelay(fireRelay, false)
-            selectedTargetUUID = nil -- Clear invalid target
         end
-
-        -- Restart the loop timer
-        timerId = os.startTimer(tickRate)
+        
+        logicTimer = os.startTimer(logicTickRate)
 
     -- ==============================
-    -- 2. MOUSE CLICK LOGIC
+    -- 2. RADAR SCANNING & UI UPDATE
+    -- ==============================
+    elseif event == "timer" and p1 == uiTimer then
+        
+        local result, err = scanner.scanEntities(scanRange)
+        
+        if type(result) == "table" then
+            scanError = nil
+            cachedEntities = result
+            -- Sort by closest
+            table.sort(cachedEntities, function(a, b)
+                return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2)
+            end)
+        else
+            -- If the API throws an error (like range limit reached), catch it
+            scanError = err or "Scan failed! (Config max range reached?)"
+            cachedEntities = {}
+        end
+        
+        drawUI()
+        uiTimer = os.startTimer(uiTickRate)
+
+    -- ==============================
+    -- 3. MOUSE CLICKS
     -- ==============================
     elseif event == "mouse_click" then
         local button, x, y = p1, p2, p3
         
-        -- Check if they clicked the "CLEAR TARGET" button on line 18
         if y == 18 then
             selectedTargetUUID = nil
             drawUI()
-        
-        -- Check if they clicked a valid entity row (rows 4 through 4+number of entities)
-        elseif y >= 4 and y < 4 + #cachedEntities then
+        elseif y >= 4 and y <= 15 then
             local clickedIndex = y - 3
             local clickedEntity = cachedEntities[clickedIndex]
-            
             if clickedEntity then
-                -- Lock on to the specific UUID of that entity
                 selectedTargetUUID = clickedEntity.uuid
                 drawUI()
             end

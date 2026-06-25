@@ -1,13 +1,22 @@
 -- ==========================================
--- ANTI-AIR TURRET FIRE CONTROL SYSTEM v2
--- (Redstone Link Edition)
+-- ANTI-AIR TURRET FIRE CONTROL SYSTEM v3
+-- (Relative Coordinate Edition)
 -- ==========================================
 
-local scanner = peripheral.find("environment_detector_0")
-local reader = peripheral.find("block_reader_0")
+-- 1. Initialize Peripherals with Safety Checks
+local scanner = peripheral.find("environmentDetector")
+local reader = peripheral.find("blockReader")
 
--- Calibration Variables
-local gX, gY, gZ = 2544, -60, 1323
+if not scanner or not reader then
+    print("ERROR: Sensors offline.")
+    print("Right-click all Wired Modems to turn them on (red ring).")
+    return
+end
+
+print("Sensors Online. AA System Active.")
+
+-- 2. Calibration Variables
+local scanRange = 32 -- Maximum radius to scan for targets
 local yawOffset = 0 -- Change to 90, 180, or -90 if the gun aims backwards
 local deadzone = 2.5 -- Degrees of tolerance before firing
 
@@ -22,21 +31,22 @@ local function wrapAngle(angle)
     return (angle + 180) % 360 - 180
 end
 
+-- 3. Main Control Loop
 while true do
-    local targets = scanner.scanEntities()
+    -- We now pass the scanRange into the function!
+    local targets = scanner.scanEntities(scanRange)
     
     if targets and #targets > 0 then
         local target = targets[1] 
+        
+        -- Because coordinates are relative, tX, tY, tZ ARE the deltas!
         local tX, tY, tZ = target.x, target.y, target.z
 
         -- Calculate distance and angles
-        local dx = tX - gX
-        local dy = tY - gY
-        local dz = tZ - gZ
-        local distXZ = math.sqrt(dx^2 + dz^2)
+        local distXZ = math.sqrt(tX^2 + tZ^2)
 
-        local targetYaw = math.deg(math.atan2(-dx, dz)) + yawOffset
-        local targetPitch = math.deg(math.atan2(dy, distXZ))
+        local targetYaw = math.deg(math.atan2(-tX, tZ)) + yawOffset
+        local targetPitch = math.deg(math.atan2(tY, distXZ))
 
         -- Read current gun state
         local gunData = reader.getBlockData()

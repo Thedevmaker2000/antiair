@@ -1,10 +1,10 @@
 -- ==========================================
--- ANTI-AIR TURRET FIRE CONTROL SYSTEM
--- (Parallel Processing & Auto-Lock Edition)
+-- ANTI-AIR TURRET FIRE CONTROL SYSTEM v11
+-- (Parallax & Calibration Edition)
 -- ==========================================
 
-local scanner = peripheral.find("environment_detector")
-local reader = peripheral.find("block_reader")
+local scanner = peripheral.find("environmentDetector")
+local reader = peripheral.find("blockReader")
 
 local yawPosRelay   = peripheral.wrap("redstone_relay_0") 
 local yawNegRelay   = peripheral.wrap("redstone_relay_1") 
@@ -13,20 +13,34 @@ local pitchNegRelay = peripheral.wrap("redstone_relay_3")
 local fireRelay     = peripheral.wrap("redstone_relay_4") 
 
 if not scanner or not reader then
-    print("ERROR: Sensors offline. Check Wired Modems.")
+    print("ERROR: Sensors offline. Check modems.")
     return
 end
 
 -- ==========================================
--- CALIBRATION
+-- 1. CALIBRATION ZONE (ADJUST THESE!)
 -- ==========================================
 local scanRange = 16  
-local yawOffset = 0 
-local deadzone = 4.0  
+local yawOffset = 0    -- Change to 90, 180, or -90 if the gun aims sideways/backwards
+local invertPitch = false -- Change to 'true' if the gun aims UP when the target is DOWN
 
--- Shared variables between the two parallel loops
+-- TEMPORARY: Increased to 10 degrees so it actually fires while you test it
+local deadzone = 10.0  
+
+-- THE PARALLAX FIX: Where is the Cannon Mount relative to the Scanner?
+-- e.g., If the mount is 2 blocks ABOVE the scanner, sOffsetY = 2
+local sOffsetX = 0 
+local sOffsetY = 0 
+local sOffsetZ = 0 
+
+-- ==========================================
+
+local logicTickRate = 0.05  
+local uiTickRate = 1.5      
+
 local cachedEntities = {}
 local scanError = nil
+local sysStatus = "STANDBY"
 
 local function wrapAngle(angle)
     return (angle + 180) % 360 - 180
@@ -35,12 +49,9 @@ end
 local function setRelay(relay, state)
     if relay then 
         pcall(function()
-            relay.setOutput("top", state)
-            relay.setOutput("bottom", state)
-            relay.setOutput("left", state)
-            relay.setOutput("right", state)
-            relay.setOutput("front", state)
-            relay.setOutput("back", state)
+            relay.setOutput("top", state); relay.setOutput("bottom", state)
+            relay.setOutput("left", state); relay.setOutput("right", state)
+            relay.setOutput("front", state); relay.setOutput("back", state)
         end)
     end
 end
@@ -48,132 +59,111 @@ end
 -- ==========================================
 -- UI DRAWING LOGIC
 -- ==========================================
-local function drawUI()
+local function drawUI(gunY, gunP, tarY, tarP)
     term.setCursorPos(1, 1)
     term.clearLine()
-    print("=== CIWS TARGETING OS (AUTO-LOCK) ===")
+    print("=== CIWS CALIBRATION OS v11 ===")
     
     term.setCursorPos(1, 2)
     term.clearLine()
-    if scanError then
-        print("RADAR STATUS: " .. tostring(scanError))
-    else
-        print("RADAR STATUS: Sweeping (" .. scanRange .. "m)...")
-    end
+    if scanError then print("RADAR: " .. tostring(scanError)) else print("RADAR: SWEEPING | SYS: " .. sysStatus) end
     
-    for i = 1, 12 do
-        term.setCursorPos(1, 3 + i)
+    -- DIAGNOSTICS: Compare these numbers to calibrate!
+    term.setCursorPos(1, 3)
+    term.clearLine()
+    print(string.format("GUN IS AT -> Yaw: %.1f | Pitch: %.1f", gunY or 0, gunP or 0))
+    term.setCursorPos(1, 4)
+    term.clearLine()
+    if tarY then
+        print(string.format("MATH WANTS-> Yaw: %.1f | Pitch: %.1f", tarY, tarP))
+    else
+        print("MATH WANTS-> NO TARGET")
+    end
+
+    term.setCursorPos(1, 5)
+    print("----------------------------------------")
+    
+    for i = 1, 10 do
+        term.setCursorPos(1, 5 + i)
         term.clearLine()
-        
         local ent = cachedEntities[i]
         if ent then
             local dist = math.floor(math.sqrt(ent.x^2 + ent.y^2 + ent.z^2))
             local prefix = "[ ]"
-            if i == 1 then prefix = "[X]" end  -- Mark the locked target
-            print(string.format("%d. %s %s (Dist: %dm)", i, prefix, ent.name, dist))
+            if i == 1 then prefix = "[X]" end 
+            print(string.format("%d. %s %s (%dm)", i, prefix, ent.name, dist))
         else
             print("") 
         end
     end
-
-    term.setCursorPos(1, 17)
-    term.clearLine()
-    print("---------------------------------------------")
-    term.setCursorPos(1, 18)
-    term.clearLine()
-    print("WARNING: STAND CLEAR. TURRET IS LIVE.")
 end
 
 -- ==========================================
--- LOOP 1: RADAR (Runs every 1.5 seconds)
+-- LOOP 1: RADAR 
 -- ==========================================
 local function radarLoop()
     while true do
-        local success, result = pcall(function() 
-            return scanner.scanEntities(scanRange) 
-        end)
-        
+        local success, result = pcall(function() return scanner.scanEntities(scanRange) end)
         if success and type(result) == "table" then
-            scanError = nil
-            cachedEntities = result
-            -- Always sort so the closest target is #1
-            table.sort(cachedEntities, function(a, b)
-                return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2)
-            end)
+            scanError = nil; cachedEntities = result
+            table.sort(cachedEntities, function(a, b) return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2) end)
         else
             scanError = result
         end
-        
-        drawUI()
-        
-        -- Sleep hands control back to the computer safely
-        os.sleep(1.5) 
+        os.sleep(uiTickRate) 
     end
 end
 
 -- ==========================================
--- LOOP 2: GUN MOTORS (Runs 20 times a second)
+-- LOOP 2: GUN MOTORS 
 -- ==========================================
 local function gunLoop()
     while true do
         local activeTarget = nil
-        if #cachedEntities > 0 then
-            activeTarget = cachedEntities[1] -- Auto-locks the closest target
-        end
+        if #cachedEntities > 0 then activeTarget = cachedEntities[1] end
+
+        local gunData = reader.getBlockData() or {}
+        local currentYaw = gunData.CannonYaw or 0
+        local currentPitch = gunData.CannonPitch or 0
+        local targetYaw, targetPitch = nil, nil
 
         if activeTarget then
-            local tX, tY, tZ = activeTarget.x, activeTarget.y, activeTarget.z
+            -- Apply the Parallax Offset
+            local tX = activeTarget.x - sOffsetX
+            local tY = activeTarget.y - sOffsetY
+            local tZ = activeTarget.z - sOffsetZ
             local distXZ = math.sqrt(tX^2 + tZ^2)
 
-            local targetYaw = math.deg(math.atan2(-tX, tZ)) + yawOffset
-            local targetPitch = math.deg(math.atan2(tY, distXZ))
-
-            local gunData = reader.getBlockData() or {}
-            local currentYaw = gunData.CannonYaw or 0
-            local currentPitch = gunData.CannonPitch or 0
+            targetYaw = math.deg(math.atan2(-tX, tZ)) + yawOffset
+            targetPitch = math.deg(math.atan2(tY, distXZ))
+            if invertPitch then targetPitch = -targetPitch end
 
             local yawError = wrapAngle(targetYaw - currentYaw)
             local pitchError = targetPitch - currentPitch
 
-            -- Yaw Control
-            if yawError > deadzone then
-                setRelay(yawPosRelay, true); setRelay(yawNegRelay, false)
-            elseif yawError < -deadzone then
-                setRelay(yawPosRelay, false); setRelay(yawNegRelay, true)
-            else
-                setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
-            end
+            if yawError > deadzone then setRelay(yawPosRelay, true); setRelay(yawNegRelay, false)
+            elseif yawError < -deadzone then setRelay(yawPosRelay, false); setRelay(yawNegRelay, true)
+            else setRelay(yawPosRelay, false); setRelay(yawNegRelay, false) end
 
-            -- Pitch Control
-            if pitchError > deadzone then
-                setRelay(pitchPosRelay, true); setRelay(pitchNegRelay, false)
-            elseif pitchError < -deadzone then
-                setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, true)
-            else
-                setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, false)
-            end
+            if pitchError > deadzone then setRelay(pitchPosRelay, true); setRelay(pitchNegRelay, false)
+            elseif pitchError < -deadzone then setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, true)
+            else setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, false) end
 
-            -- Firing Control
             if math.abs(yawError) <= deadzone and math.abs(pitchError) <= deadzone then
-                setRelay(fireRelay, true)
+                setRelay(fireRelay, true); sysStatus = "FIRING!"
             else
-                setRelay(fireRelay, false)
+                setRelay(fireRelay, false); sysStatus = "TRACKING"
             end
         else
-            -- Safety weapon mode (No Targets)
             setRelay(yawPosRelay, false); setRelay(yawNegRelay, false)
             setRelay(pitchPosRelay, false); setRelay(pitchNegRelay, false)
-            setRelay(fireRelay, false)
+            setRelay(fireRelay, false); sysStatus = "STANDBY"
         end
         
-        -- Run at 20 ticks per second synced with Minecraft
-        os.sleep(0.05) 
+        drawUI(currentYaw, currentPitch, targetYaw, targetPitch)
+        os.sleep(logicTickRate) 
     end
 end
 
--- ==========================================
--- BOOT SEQUENCE
--- ==========================================
 term.clear()
--- Run both loops simultaneously. They will never block each other again.
 parallel.waitForAll(radarLoop, gunLoop)

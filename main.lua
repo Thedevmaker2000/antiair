@@ -3,8 +3,8 @@
 -- (Redstone Link Edition)
 -- ==========================================
 
-local scanner = peripheral.find("environmentDetector")
-local reader = peripheral.find("blockReader")
+local scanner = peripheral.find("environment_detector_0")
+local reader = peripheral.find("block_reader_0")
 
 -- Calibration Variables
 local gX, gY, gZ = 2544, -60, 1323

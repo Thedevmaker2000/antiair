@@ -1,6 +1,6 @@
 -- ==========================================
--- ANTI-AIR TURRET FIRE CONTROL SYSTEM v7
--- (Omni-Power & Anti-Crash Edition)
+-- ANTI-AIR TURRET FIRE CONTROL SYSTEM v8
+-- (Radar Sync & Diagnostic Edition)
 -- ==========================================
 
 local scanner = peripheral.find("environmentDetector")
@@ -20,21 +20,21 @@ end
 -- ==========================================
 -- CALIBRATION
 -- ==========================================
-local scanRange = 32 -- Restored to 32m
+local scanRange = 32 
 local yawOffset = 0 
 local deadzone = 2.5 
 
-local logicTickRate = 0.05 
-local uiTickRate = 0.5      
+local logicTickRate = 0.05  -- Gun motors run at 20 ticks per second
+local uiTickRate = 1.5      -- Radar sweeps every 1.5 seconds to respect server cooldowns
 
 local selectedTargetUUID = nil
 local cachedEntities = {}
+local scanError = nil
 
 local function wrapAngle(angle)
     return (angle + 180) % 360 - 180
 end
 
--- UPGRADE: Blast redstone out of every single side of the relay block
 local function setRelay(relay, state)
     if relay then 
         pcall(function()
@@ -49,19 +49,24 @@ local function setRelay(relay, state)
 end
 
 -- ==========================================
--- FLICKER-FREE UI DRAWING
+-- UI DRAWING LOGIC
 -- ==========================================
 local function drawUI()
     term.setCursorPos(1, 1)
     term.clearLine()
-    print("=== RADAR TARGETING OS v7 ===")
+    print("=== RADAR TARGETING OS v8 ===")
     
     term.setCursorPos(1, 2)
     term.clearLine()
-    print("Click target to lock. Range: " .. scanRange .. "m")
+    if scanError then
+        -- If the server rejects the scan, show it in RED if your terminal supports color
+        print("RADAR STATUS: " .. tostring(scanError))
+    else
+        print("RADAR STATUS: Sweeping (" .. scanRange .. "m)...")
+    end
     
     for i = 1, 12 do
-        term.setCursorPos(1, 2 + i)
+        term.setCursorPos(1, 3 + i)
         term.clearLine()
         
         local ent = cachedEntities[i]
@@ -71,14 +76,14 @@ local function drawUI()
             if ent.uuid == selectedTargetUUID then prefix = "[X]" end
             print(string.format("%d. %s %s (Dist: %dm)", i, prefix, ent.name, dist))
         else
-            print("") -- Clear unused lines
+            print("") 
         end
     end
 
-    term.setCursorPos(1, 16)
+    term.setCursorPos(1, 17)
     term.clearLine()
     print("---------------------------------------------")
-    term.setCursorPos(1, 17)
+    term.setCursorPos(1, 18)
     term.clearLine()
     print("[X] CLEAR CURRENT TARGET")
 end
@@ -156,22 +161,27 @@ while true do
         logicTimer = os.startTimer(logicTickRate)
 
     -- ==============================
-    -- 2. RADAR SCANNING (Safe Mode)
+    -- 2. RADAR SCANNING LOGIC
     -- ==============================
     elseif event == "timer" and p1 == uiTimer then
         
-        -- UPGRADE: pcall prevents the cooldown crash. 
-        local success, result = pcall(scanner.scanEntities, scanRange)
+        -- Safely execute the scan
+        local success, result = pcall(function() 
+            return scanner.scanEntities(scanRange) 
+        end)
         
-        -- If scan succeeds, update our list. If it fails (cooldown), we just ignore it!
         if success and type(result) == "table" then
+            scanError = nil
             cachedEntities = result
             table.sort(cachedEntities, function(a, b)
                 return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2)
             end)
-            drawUI()
+        else
+            -- Capture the error so it displays on the UI
+            scanError = result
         end
         
+        drawUI()
         uiTimer = os.startTimer(uiTickRate)
 
     -- ==============================
@@ -180,11 +190,11 @@ while true do
     elseif event == "mouse_click" then
         local button, x, y = p1, p2, p3
         
-        if y == 17 then
+        if y == 18 then
             selectedTargetUUID = nil
             drawUI()
-        elseif y >= 3 and y <= 14 then
-            local clickedIndex = y - 2
+        elseif y >= 4 and y <= 15 then
+            local clickedIndex = y - 3
             local clickedEntity = cachedEntities[clickedIndex]
             if clickedEntity then
                 selectedTargetUUID = clickedEntity.uuid

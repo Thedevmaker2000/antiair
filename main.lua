@@ -1,10 +1,10 @@
 -- ==========================================
 -- ANTI-AIR TURRET FIRE CONTROL SYSTEM
--- (V8 Baseline + Auto-Lock Fix)
+-- (Parallel Processing & Auto-Lock Edition)
 -- ==========================================
 
-local scanner = peripheral.find("environmentDetector")
-local reader = peripheral.find("blockReader")
+local scanner = peripheral.find("environment_detector")
+local reader = peripheral.find("block_reader")
 
 local yawPosRelay   = peripheral.wrap("redstone_relay_0") 
 local yawNegRelay   = peripheral.wrap("redstone_relay_1") 
@@ -20,13 +20,11 @@ end
 -- ==========================================
 -- CALIBRATION
 -- ==========================================
-local scanRange = 16  -- Hard-capped to 16 to prevent server config crashes
+local scanRange = 16  
 local yawOffset = 0 
-local deadzone = 4.0  -- Slightly increased to stop 128 RPM jitter
+local deadzone = 4.0  
 
-local logicTickRate = 0.05  -- Gun motors run at 20 ticks per second
-local uiTickRate = 1.5      -- Radar sweeps every 1.5 seconds
-
+-- Shared variables between the two parallel loops
 local cachedEntities = {}
 local scanError = nil
 
@@ -71,8 +69,7 @@ local function drawUI()
         if ent then
             local dist = math.floor(math.sqrt(ent.x^2 + ent.y^2 + ent.z^2))
             local prefix = "[ ]"
-            -- Visually highlight the closest entity that the gun is locking onto
-            if i == 1 then prefix = "[X]" end 
+            if i == 1 then prefix = "[X]" end  -- Mark the locked target
             print(string.format("%d. %s %s (Dist: %dm)", i, prefix, ent.name, dist))
         else
             print("") 
@@ -88,26 +85,40 @@ local function drawUI()
 end
 
 -- ==========================================
--- MAIN EVENT LOOP
+-- LOOP 1: RADAR (Runs every 1.5 seconds)
 -- ==========================================
-local logicTimer = os.startTimer(logicTickRate)
-local uiTimer = os.startTimer(uiTickRate)
-
-term.clear()
-drawUI()
-
-while true do
-    local event, p1, p2, p3 = os.pullEvent()
-
-    -- ==============================
-    -- 1. GUN MOVEMENT LOGIC
-    -- ==============================
-    if event == "timer" and p1 == logicTimer then
+local function radarLoop()
+    while true do
+        local success, result = pcall(function() 
+            return scanner.scanEntities(scanRange) 
+        end)
         
-        -- THE FIX: Completely bypass mouse clicks. Always grab the closest target.
+        if success and type(result) == "table" then
+            scanError = nil
+            cachedEntities = result
+            -- Always sort so the closest target is #1
+            table.sort(cachedEntities, function(a, b)
+                return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2)
+            end)
+        else
+            scanError = result
+        end
+        
+        drawUI()
+        
+        -- Sleep hands control back to the computer safely
+        os.sleep(1.5) 
+    end
+end
+
+-- ==========================================
+-- LOOP 2: GUN MOTORS (Runs 20 times a second)
+-- ==========================================
+local function gunLoop()
+    while true do
         local activeTarget = nil
         if #cachedEntities > 0 then
-            activeTarget = cachedEntities[1]
+            activeTarget = cachedEntities[1] -- Auto-locks the closest target
         end
 
         if activeTarget then
@@ -117,7 +128,6 @@ while true do
             local targetYaw = math.deg(math.atan2(-tX, tZ)) + yawOffset
             local targetPitch = math.deg(math.atan2(tY, distXZ))
 
-            -- Added a safety fallback in case the block reader glitches
             local gunData = reader.getBlockData() or {}
             local currentYaw = gunData.CannonYaw or 0
             local currentPitch = gunData.CannonPitch or 0
@@ -156,29 +166,14 @@ while true do
             setRelay(fireRelay, false)
         end
         
-        logicTimer = os.startTimer(logicTickRate)
-
-    -- ==============================
-    -- 2. RADAR SCANNING LOGIC
-    -- ==============================
-    elseif event == "timer" and p1 == uiTimer then
-        
-        local success, result = pcall(function() 
-            return scanner.scanEntities(scanRange) 
-        end)
-        
-        if success and type(result) == "table" then
-            scanError = nil
-            cachedEntities = result
-            table.sort(cachedEntities, function(a, b)
-                return (a.x^2 + a.y^2 + a.z^2) < (b.x^2 + b.y^2 + b.z^2)
-            end)
-        else
-            scanError = result
-        end
-        
-        drawUI()
-        uiTimer = os.startTimer(uiTickRate)
+        -- Run at 20 ticks per second synced with Minecraft
+        os.sleep(0.05) 
     end
-    -- Mouse clicks completely removed to prevent UI lockups
 end
+
+-- ==========================================
+-- BOOT SEQUENCE
+-- ==========================================
+term.clear()
+-- Run both loops simultaneously. They will never block each other again.
+parallel.waitForAll(radarLoop, gunLoop)

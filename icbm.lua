@@ -93,6 +93,10 @@ print("\n[C] to Cancel, [Enter] to Assemble.")
 if io.read() == "c" then return end
 
 rednet.send(serverId, {cmd = "ASSEMBLE", state = true}, "CBC_ARTILLERY")
+
+-- FIX 1: Read the server's "Assemble Success" reply so it doesn't clog the inbox
+rednet.receive("CBC_ARTILLERY", 1) 
+
 print("Sending Aim Data...")
 rednet.send(serverId, {cmd = "AIM", yaw = targetYaw, pitch = targetPitch}, "CBC_ARTILLERY")
 
@@ -101,7 +105,8 @@ while true do
     rednet.send(serverId, {cmd = "GET_INFO"}, "CBC_ARTILLERY")
     local _, curInfo = rednet.receive("CBC_ARTILLERY", 2)
     
-    if curInfo then
+    -- FIX 2: Only do the math if the message actually contains cannon telemetry
+    if curInfo and curInfo.yaw then
         local curYaw = (curInfo.yaw % 360 + 360) % 360
         local curPitch = curInfo.pitch
         
@@ -117,9 +122,6 @@ while true do
             print("\n\n!! TARGET LOCKED !!")
             break
         end
-    else
-        print("\nConnection lost during alignment!")
-        return
     end
     os.sleep(0.1)
 end

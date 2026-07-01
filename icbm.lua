@@ -1,19 +1,20 @@
 -- ==========================================
--- REMOTE ARTILLERY CLIENT (POCKET PC) v16
--- (CBC Tick-Simulation Ballistics)
--- Original Python Math by @sashafiesta#1978
+-- REMOTE ARTILLERY CLIENT (POCKET PC) v17
+-- (Enhanced Shells & Multi-Tier Powder)
 -- ==========================================
 
 peripheral.find("modem", function(name) rednet.open(name) end)
 
 -- ==========================================
--- 1. CALIBRATION
+-- 1. CALIBRATION ZONE 
 -- ==========================================
 local BARREL_LENGTH = 10 
-local YAW_OFFSET = 0
+local YAW_OFFSET = -140 
+local VELOCITY_PER_BARREL = 0.1 
 
 -- ==========================================
 local function wrapAngle(angle) return (angle + 180) % 360 - 180 end
+
 local function timeInAir(y0, targetY, initialVy)
     local y = y0
     local vy = initialVy
@@ -44,8 +45,12 @@ local function timeInAir(y0, targetY, initialVy)
     return -1, -1
 end
 
-local function findBestPitch(dist, targetY, cY, charges, length)
-    local initSpeed = charges * 2.0
+-- UPGRADED: Now accepts the tier parameter to adjust base velocity
+local function findBestPitch(dist, targetY, cY, charges, length, tier)
+    -- Calculate speed based on Mk. level (Base=2.0, Mk1=2.5, Mk2=3.0, etc.)
+    local speedPerCharge = 2.0 + (tier * 0.5)
+    local initSpeed = (charges * speedPerCharge) + (length * VELOCITY_PER_BARREL)
+    
     local bestDiff = 999999
     local bestPitch = nil
     local bestAirtime = 0
@@ -61,7 +66,6 @@ local function findBestPitch(dist, targetY, cY, charges, length)
             local distToCover = dist - xBarrel
             
             local dragFactor = distToCover / (100 * Vw)
-            -- Only calculate if the target is horizontally reachable against drag
             if dragFactor < 1 and dragFactor > -1 then 
                 local t_horiz = math.abs(math.log(1 - dragFactor) / -0.010050335853501)
                 local yBarrel = cY + math.sin(rad) * length
@@ -72,7 +76,6 @@ local function findBestPitch(dist, targetY, cY, charges, length)
                     local diff1 = math.abs(t_horiz - t_below)
                     local diff2 = math.abs(t_horiz - t_above)
                     local minDiff = math.min(diff1, diff2)
-                    local timeToUse = (minDiff == diff1) and t_below or t_above
                     
                     if minDiff < bDiff then
                         bDiff = minDiff
@@ -85,10 +88,8 @@ local function findBestPitch(dist, targetY, cY, charges, length)
         return bDiff, bPitch, bTime
     end
     
-    -- Pass 1: Fast coarse search (-30 to 60 deg)
     local d, p, t = search(-30, 60, 1)
     if p then
-        -- Pass 2: Fine search for ultimate precision
         d, p, t = search(p - 2, p + 2, 0.05)
         return p, t, d
     end
@@ -112,7 +113,7 @@ print("Uplink Active! [ID: " .. serverId .. "]")
 local cX, cY, cZ = info.x, info.y, info.z
 
 -- ==========================================
--- 2. COORDS
+-- 2. GET STRIKE COORDINATES
 -- ==========================================
 print("------------------------")
 print("Target X:")
@@ -122,8 +123,12 @@ local tZ = tonumber(io.read())
 print("Target Y (Elevation):")
 local tY = tonumber(io.read())
 
-print("Powder Charges:")
+print("Number of Charges:")
 local charges = tonumber(io.read())
+
+-- NEW: Ask for the Enhanced Shell Tier
+print("Charge Tier (0=Base, 1-5=Mk1-5):")
+local chargeTier = tonumber(io.read()) or 0
 
 -- ==========================================
 -- 3. CBC BALLISTIC SIMULATION
@@ -136,11 +141,12 @@ term.clear()
 term.setCursorPos(1,1)
 print("Simulating Trajectory...")
 
-local targetPitch, airtimeTicks, accuracyDiff = findBestPitch(distXZ, tY, cY, charges, BARREL_LENGTH)
+-- Pass the new chargeTier into the simulator
+local targetPitch, airtimeTicks, accuracyDiff = findBestPitch(distXZ, tY, cY, charges, BARREL_LENGTH, chargeTier)
 
 if not targetPitch then
     print("== SOLUTION FAILED ==")
-    print("OUT OF RANGE! (Target too far for " .. charges .. " charges against air resistance)")
+    print("OUT OF RANGE! Target too far.")
     return
 end
 
@@ -162,7 +168,7 @@ print("\n[C] Cancel, [Enter] Assemble")
 if io.read() == "c" then return end
 
 rednet.send(serverId, {cmd = "ASSEMBLE", state = true}, "CBC_ARTILLERY")
-rednet.receive("CBC_ARTILLERY", 1) -- Clear inbox
+rednet.receive("CBC_ARTILLERY", 1) 
 
 print("Sending Aim Data...")
 rednet.send(serverId, {cmd = "AIM", yaw = targetYaw, pitch = targetPitch}, "CBC_ARTILLERY")

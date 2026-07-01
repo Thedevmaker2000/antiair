@@ -1,37 +1,110 @@
 -- ==========================================
--- REMOTE ARTILLERY CLIENT (POCKET PC)
+-- REMOTE ARTILLERY CLIENT (POCKET PC) v16
+-- (CBC Tick-Simulation Ballistics)
+-- Original Python Math by @sashafiesta#1978
 -- ==========================================
 
--- Open the built-in pocket modem
 peripheral.find("modem", function(name) rednet.open(name) end)
 
 -- ==========================================
--- 1. CALIBRATION ZONE 
+-- 1. CALIBRATION
 -- ==========================================
-local VELOCITY_PER_CHARGE = 2.0 
-local VELOCITY_PER_BARREL = 0.1 
-local GRAVITY = 0.05            
-
--- Hardcoded so you don't have to type them every time!
 local BARREL_LENGTH = 10 
 local YAW_OFFSET = 0
 
 -- ==========================================
-
 local function wrapAngle(angle) return (angle + 180) % 360 - 180 end
+local function timeInAir(y0, targetY, initialVy)
+    local y = y0
+    local vy = initialVy
+    local t = 0
+    local t_below = 999999
+    
+    if y <= targetY then
+        while t < 10000 do
+            y = y + vy
+            vy = 0.99 * vy - 0.05
+            t = t + 1
+            if y > targetY then
+                t_below = t - 1
+                break
+            end
+            if vy < 0 then return -1, -1 end
+        end
+    end
+    
+    while t < 10000 do
+        y = y + vy
+        vy = 0.99 * vy - 0.05
+        t = t + 1
+        if y <= targetY then
+            return t_below, t
+        end
+    end
+    return -1, -1
+end
+
+local function findBestPitch(dist, targetY, cY, charges, length)
+    local initSpeed = charges * 2.0
+    local bestDiff = 999999
+    local bestPitch = nil
+    local bestAirtime = 0
+    
+    local search = function(startP, endP, step)
+        local bDiff, bPitch, bTime = bestDiff, bestPitch, bestAirtime
+        for p = startP, endP, step do
+            local rad = math.rad(p)
+            local Vw = math.cos(rad) * initSpeed
+            local Vy = math.sin(rad) * initSpeed
+            
+            local xBarrel = length * math.cos(rad)
+            local distToCover = dist - xBarrel
+            
+            local dragFactor = distToCover / (100 * Vw)
+            -- Only calculate if the target is horizontally reachable against drag
+            if dragFactor < 1 and dragFactor > -1 then 
+                local t_horiz = math.abs(math.log(1 - dragFactor) / -0.010050335853501)
+                local yBarrel = cY + math.sin(rad) * length
+                
+                local t_below, t_above = timeInAir(yBarrel, targetY, Vy)
+                
+                if t_below >= 0 then
+                    local diff1 = math.abs(t_horiz - t_below)
+                    local diff2 = math.abs(t_horiz - t_above)
+                    local minDiff = math.min(diff1, diff2)
+                    local timeToUse = (minDiff == diff1) and t_below or t_above
+                    
+                    if minDiff < bDiff then
+                        bDiff = minDiff
+                        bPitch = p
+                        bTime = t_horiz
+                    end
+                end
+            end
+        end
+        return bDiff, bPitch, bTime
+    end
+    
+    -- Pass 1: Fast coarse search (-30 to 60 deg)
+    local d, p, t = search(-30, 60, 1)
+    if p then
+        -- Pass 2: Fine search for ultimate precision
+        d, p, t = search(p - 2, p + 2, 0.05)
+        return p, t, d
+    end
+    return nil, nil, nil
+end
 
 term.clear()
 term.setCursorPos(1,1)
 print("== POCKET ICBM UPLINK ==")
 print("Searching for Firebase...")
 
--- Auto-Discover the Server
 rednet.broadcast({cmd = "GET_INFO"}, "CBC_ARTILLERY")
 local serverId, info = rednet.receive("CBC_ARTILLERY", 3)
 
 if not serverId then
     print("ERROR: No Cannon Server found.")
-    print("Are chunks loaded?")
     return
 end
 
@@ -39,7 +112,7 @@ print("Uplink Active! [ID: " .. serverId .. "]")
 local cX, cY, cZ = info.x, info.y, info.z
 
 -- ==========================================
--- 2. GET STRIKE COORDINATES
+-- 2. COORDS
 -- ==========================================
 print("------------------------")
 print("Target X:")
@@ -53,59 +126,51 @@ print("Powder Charges:")
 local charges = tonumber(io.read())
 
 -- ==========================================
--- 3. BALLISTIC MATH
+-- 3. CBC BALLISTIC SIMULATION
 -- ==========================================
 local dx = tX - cX
-local dy = tY - cY
 local dz = tZ - cZ
 local distXZ = math.sqrt(dx^2 + dz^2)
 
-local v = (charges * VELOCITY_PER_CHARGE) + (BARREL_LENGTH * VELOCITY_PER_BARREL)
-local g = GRAVITY
-local root = v^4 - g * (g * distXZ^2 + 2 * dy * v^2)
-
 term.clear()
 term.setCursorPos(1,1)
+print("Simulating Trajectory...")
 
-if root < 0 then
+local targetPitch, airtimeTicks, accuracyDiff = findBestPitch(distXZ, tY, cY, charges, BARREL_LENGTH)
+
+if not targetPitch then
     print("== SOLUTION FAILED ==")
-    print("OUT OF RANGE!")
+    print("OUT OF RANGE! (Target too far for " .. charges .. " charges against air resistance)")
     return
 end
 
-local pitchRad = math.atan((v^2 - math.sqrt(root)) / (g * distXZ))
-local targetPitch = math.deg(pitchRad) 
 local targetYaw = math.deg(math.atan2(-dx, dz)) + YAW_OFFSET
 targetYaw = (targetYaw % 360 + 360) % 360
-
-local vX = v * math.cos(pitchRad) 
-local airtimeTicks = math.floor(distXZ / vX)
+airtimeTicks = math.floor(airtimeTicks)
 
 -- ==========================================
 -- 4. REMOTE EXECUTION
 -- ==========================================
+term.clear()
+term.setCursorPos(1,1)
 print("Tgt : " .. math.floor(distXZ) .. "m away")
 print("Yaw : " .. string.format("%.1f", targetYaw))
-print("Ptch: " .. string.format("%.1f", targetPitch))
+print("Ptch: " .. string.format("%.2f", targetPitch))
 print("Fuze: " .. airtimeTicks .. " ticks")
 
-print("\n[C] to Cancel, [Enter] to Assemble.")
+print("\n[C] Cancel, [Enter] Assemble")
 if io.read() == "c" then return end
 
 rednet.send(serverId, {cmd = "ASSEMBLE", state = true}, "CBC_ARTILLERY")
-
--- FIX 1: Read the server's "Assemble Success" reply so it doesn't clog the inbox
-rednet.receive("CBC_ARTILLERY", 1) 
+rednet.receive("CBC_ARTILLERY", 1) -- Clear inbox
 
 print("Sending Aim Data...")
 rednet.send(serverId, {cmd = "AIM", yaw = targetYaw, pitch = targetPitch}, "CBC_ARTILLERY")
 
--- LIVE TELEMETRY LOOP
 while true do
     rednet.send(serverId, {cmd = "GET_INFO"}, "CBC_ARTILLERY")
     local _, curInfo = rednet.receive("CBC_ARTILLERY", 2)
     
-    -- FIX 2: Only do the math if the message actually contains cannon telemetry
     if curInfo and curInfo.yaw then
         local curYaw = (curInfo.yaw % 360 + 360) % 360
         local curPitch = curInfo.pitch

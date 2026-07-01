@@ -1,6 +1,6 @@
 -- ==========================================
--- CBC AUTO-ARTILLERY FIRE CONTROL
--- (Direct API Integration & Ballistic Math)
+-- CBC AUTO-ARTILLERY FIRE CONTROL v14.1
+-- (Smart Alignment & Telemetry Edition)
 -- ==========================================
 
 local cannon = peripheral.find("cannon_mount")
@@ -9,17 +9,18 @@ if not cannon then
     return
 end
 
--- Force the cannon into computer control mode
 cannon.setComputerControl(true)
 
 -- ==========================================
--- 1. CALIBRATION (Tweak these for your server)
+-- 1. CALIBRATION (Tweak Velocity for Steel)
 -- ==========================================
--- CBC velocity depends heavily on material (Bronze, Steel, etc.) and config.
--- Adjust this number if your shots are consistently overshooting or undershooting.
-local VELOCITY_PER_CHARGE = 2.0 -- Blocks per tick per powder charge
-local VELOCITY_PER_BARREL = 0.1 -- Extra speed added per barrel block
-local GRAVITY = 0.05            -- CBC default gravity per tick
+local VELOCITY_PER_CHARGE = 2.0 
+local VELOCITY_PER_BARREL = 0.1 
+local GRAVITY = 0.05            
+
+local function wrapAngle(angle)
+    return (angle + 180) % 360 - 180
+end
 
 -- ==========================================
 -- 2. GET USER INPUTS
@@ -28,7 +29,6 @@ term.clear()
 term.setCursorPos(1,1)
 print("=== CBC ARTILLERY OS ===")
 
--- Auto-fetch mount position!
 local info = cannon.getInfo()
 local cX, cY, cZ = info.x, info.y, info.z
 print("[+] Mount Pos: " .. cX .. ", " .. cY .. ", " .. cZ)
@@ -58,11 +58,9 @@ local dy = tY - cY
 local dz = tZ - cZ
 local distXZ = math.sqrt(dx^2 + dz^2)
 
--- Calculate Muzzle Velocity
 local v = (charges * VELOCITY_PER_CHARGE) + (barrelLength * VELOCITY_PER_BARREL)
 local g = GRAVITY
 
--- The Ballistic Arc Equation
 local root = v^4 - g * (g * distXZ^2 + 2 * dy * v^2)
 
 term.clear()
@@ -71,62 +69,73 @@ term.setCursorPos(1,1)
 if root < 0 then
     print("=== FIRING SOLUTION FAILED ===")
     print("TARGET IS OUT OF RANGE!")
-    print("Increase charges or move closer.")
+    print("Increase powder charges.")
     return
 end
 
--- Calculate Pitch (Using the lower arc trajectory)
 local pitchRad = math.atan((v^2 - math.sqrt(root)) / (g * distXZ))
-
--- CC:CBC usually treats looking UP as a positive angle, but if your 
--- physical mount is inverted, you may need to add a minus sign here:
 local targetPitch = math.deg(pitchRad) 
 local targetYaw = math.deg(math.atan2(-dx, dz)) + yawOffset
 
--- Calculate Airtime
-local vX = v * math.cos(pitchRad) -- Horizontal velocity component
-local airtimeTicks = math.floor(distXZ / vX)
-local airtimeSeconds = airtimeTicks / 20
+-- Normalize target yaw to be within standard 360 bounds
+targetYaw = (targetYaw % 360 + 360) % 360
 
--- Calculate Relative Precision (Estimates spread based on distance & barrel)
-local precisionRaw = 100 - (distXZ / (barrelLength * 5))
-local precision = math.max(0, math.min(100, precisionRaw))
+local vX = v * math.cos(pitchRad) 
+local airtimeTicks = math.floor(distXZ / vX)
 
 -- ==========================================
--- 4. EXECUTION
+-- 4. EXECUTION & ALIGNMENT
 -- ==========================================
 print("=== FIRING SOLUTION ACQUIRED ===")
 print(string.format("Target Range : %dm", math.floor(distXZ)))
-print(string.format("Calculated V0: %.2f blocks/tick", v))
 print("--------------------------------")
 print(string.format("Yaw          : %.2f deg", targetYaw))
 print(string.format("Pitch        : %.2f deg", targetPitch))
-print(string.format("Airtime      : %d ticks (%.2f sec)", airtimeTicks, airtimeSeconds))
 print(string.format("Fuze Setting : %d ticks", airtimeTicks))
-print(string.format("Rel. Precision: %.1f%%", precision))
 print("--------------------------------")
 
 print("\nAssemble Cannon? (y/n)")
 if io.read() == "y" then
-    local isAssembled = cannon.assemble(true)
-    if not isAssembled then
-        print("WARNING: Cannon failed to assemble. Check blocks.")
-    else
-        print("Cannon assembled.")
-    end
+    cannon.assemble(true)
+    print("Cannon assembled.")
 end
 
 print("\nAim Cannon? (y/n)")
 if io.read() == "y" then
-    -- No more relays! We just tell the API where to look.
     cannon.setTargetAngles(targetYaw, targetPitch)
-    print("Motors engaged. Waiting for alignment...")
+    print("\n[ ALIGNING MOTORS... ]")
+    
+    -- THE ALIGNMENT LOOP: Waits for the cannon to finish moving
+    while true do
+        local curInfo = cannon.getInfo()
+        local curYaw = (curInfo.yaw % 360 + 360) % 360
+        local curPitch = curInfo.pitch
+        
+        local yDiff = math.abs(wrapAngle(targetYaw - curYaw))
+        local pDiff = math.abs(targetPitch - curPitch)
+        
+        -- Print real-time telemetry over the same line to prevent spam
+        local x, y = term.getCursorPos()
+        term.setCursorPos(1, y)
+        term.clearLine()
+        term.write(string.format("Current -> Yaw: %.1f | Pitch: %.1f", curYaw, curPitch))
+        
+        -- If we are within 0.5 degrees of the target, we are locked on
+        if yDiff <= 0.5 and pDiff <= 0.5 then
+            print("\n\nTARGET LOCKED.")
+            break
+        end
+        
+        os.sleep(0.1)
+    end
 end
 
 print("\nFIRE? (y/n)")
 if io.read() == "y" then
+    -- We can still keep Relay 4 for firing if your physical firing mechanism needs it,
+    -- but CC:CBC has a built-in fire command!
     cannon.fire(true)
-    os.sleep(0.5) -- Hold the trigger for half a second
+    os.sleep(0.5) 
     cannon.fire(false)
     print("SHOT OUT.")
 end
